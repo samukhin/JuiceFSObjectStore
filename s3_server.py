@@ -7,6 +7,7 @@
 - Скачивание объектов (GET /{bucket}/{object})
 - Удаление объектов (DELETE /{bucket}/{object})
 - Список объектов в бакете (GET /{bucket})
+- Метаданные объекта (HEAD /{bucket}/{object})
 
 Данные хранятся в памяти (dict), поэтому при перезапуске
 сервера данные теряются.
@@ -134,16 +135,47 @@ async def put_object(bucket: str, obj: str, request: Request):
     Загружает объект в бакет.
     Читает тело запроса как данные объекта и сохраняет в памяти.
     Если бакет не найден, возвращает ошибку 404.
+    Поддерживает условные заголовки If-None-Match и If-Match для условных записей.
     Возвращает ETag в заголовке.
     """
     data = await request.body()  # Асинхронно читаем тело запроса
     async with lock:
         if bucket not in buckets:
             raise HTTPException(status_code=404, detail="Bucket not found")
+
+        # Проверяем условные заголовки для поддержки условных записей
+        if_none_match = request.headers.get("If-None-Match")
+
+        # If-None-Match: * означает, что объект не должен существовать
+        if if_none_match == "*" and obj in buckets[bucket]:
+            raise HTTPException(status_code=412, detail="Precondition Failed")
+
         buckets[bucket][obj] = data  # Сохраняем данные объекта
     # Вычисляем ETag как MD5 хэш данных
     etag = hashlib.md5(data).hexdigest()
     return Response(status_code=200, headers={"ETag": f'"{etag}"'})
+
+
+@app.head("/{bucket}/{obj:path}")
+async def head_object(bucket: str, obj: str):
+    """
+    Возвращает метаданные объекта без тела.
+    Используется для проверки существования объекта.
+    Если объект или бакет не найдены, возвращает ошибку 404.
+    """
+    async with lock:
+        if bucket not in buckets or obj not in buckets[bucket]:
+            raise HTTPException(status_code=404, detail="Object not found")
+        data = buckets[bucket][obj]  # Получаем данные объекта
+    etag = hashlib.md5(data).hexdigest()
+    return Response(
+        status_code=200,
+        headers={
+            "ETag": f'"{etag}"',
+            "Content-Length": str(len(data)),
+            "Content-Type": "application/octet-stream",
+        },
+    )
 
 
 @app.get("/{bucket}/{obj:path}")
