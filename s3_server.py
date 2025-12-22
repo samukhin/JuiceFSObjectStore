@@ -24,14 +24,17 @@ http://localhost:8000/docs
 # Импортируем необходимые модули
 import argparse  # Для парсинга аргументов командной строки
 import asyncio  # Для асинхронного lock
+import hashlib  # Для вычисления ETag
 import logging  # Для логирования в debug режиме
 from collections import defaultdict  # Для автоматического создания dict
+from datetime import datetime, timezone  # Для LastModified
 from io import BytesIO  # Для работы с байтовыми данными в памяти
 
 from fastapi import (  # FastAPI для создания API, HTTPException для ошибок
     FastAPI,
     HTTPException,
     Request,
+    Response,
 )
 from fastapi.responses import StreamingResponse  # Для потоковой отдачи файлов
 
@@ -42,6 +45,47 @@ app = FastAPI()
 buckets: dict[str, dict[str, bytes]] = defaultdict(dict)
 lock = asyncio.Lock()
 # словарь бакетов: {бакет: {объект: данные}}
+
+
+def generate_bucket_list_xml(
+    bucket: str,
+    prefix: str,
+    filtered_objects: list[str],
+    bucket_data: dict[str, bytes],
+) -> str:
+    """
+    Генерирует XML для списка объектов в бакете в формате S3.
+    """
+    xml_parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-20/">',
+        f"<Name>{bucket}</Name>",
+        f"<Prefix>{prefix}</Prefix>",
+        f"<KeyCount>{len(filtered_objects)}</KeyCount>",
+        "<MaxKeys>1000</MaxKeys>",
+        "<IsTruncated>false</IsTruncated>",
+    ]
+    for obj in filtered_objects:
+        data = bucket_data[obj]
+        # Вычисляем ETag как MD5 хэш данных объекта
+        etag = hashlib.md5(data).hexdigest()
+        # Получаем текущее время в UTC для LastModified
+        utc_now = datetime.now(timezone.utc)
+        last_modified = utc_now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        size = len(data)
+        xml_parts.extend(
+            [
+                "<Contents>",
+                f"<Key>{obj}</Key>",
+                f"<LastModified>{last_modified}</LastModified>",
+                f'<ETag>"{etag}"</ETag>',
+                f"<Size>{size}</Size>",
+                "<StorageClass>STANDARD</StorageClass>",
+                "</Contents>",
+            ]
+        )
+    xml_parts.append("</ListBucketResult>")
+    return "\n".join(xml_parts)
 
 
 @app.put("/{bucket}")
@@ -57,20 +101,31 @@ async def create_bucket(bucket: str):
                 detail="Bucket already exists",
             )
         buckets[bucket]  # Инициализируем пустой словарь для объектов
-    return {"message": "Bucket created"}
+    return Response(status_code=200)
 
 
 @app.get("/{bucket}")
-async def list_objects(bucket: str):
+async def list_objects(
+    bucket: str,
+    list_type: str | None = None,
+    prefix: str = "",
+):
     """
-    Возвращает список объектов в указанном бакете.
+    Возвращает список объектов в указанном бакете в формате S3 XML.
     Если бакет не найден, возвращает ошибку 404.
     """
     async with lock:
         if bucket not in buckets:
             raise HTTPException(status_code=404, detail="Bucket not found")
-        objects = list(buckets[bucket].keys())  # Получаем имена объектов
-    return {"objects": objects}
+        # Фильтруем объекты по префиксу
+        filtered_objects = [
+            obj for obj in buckets[bucket].keys() if obj.startswith(prefix)
+        ]
+        # Генерируем XML
+        xml_response = generate_bucket_list_xml(
+            bucket, prefix, filtered_objects, buckets[bucket]
+        )
+    return Response(content=xml_response, media_type="application/xml")
 
 
 @app.put("/{bucket}/{obj:path}")
@@ -79,13 +134,16 @@ async def put_object(bucket: str, obj: str, request: Request):
     Загружает объект в бакет.
     Читает тело запроса как данные объекта и сохраняет в памяти.
     Если бакет не найден, возвращает ошибку 404.
+    Возвращает ETag в заголовке.
     """
     data = await request.body()  # Асинхронно читаем тело запроса
     async with lock:
         if bucket not in buckets:
             raise HTTPException(status_code=404, detail="Bucket not found")
         buckets[bucket][obj] = data  # Сохраняем данные объекта
-    return {"message": "Object uploaded"}
+    # Вычисляем ETag как MD5 хэш данных
+    etag = hashlib.md5(data).hexdigest()
+    return Response(status_code=200, headers={"ETag": f'"{etag}"'})
 
 
 @app.get("/{bucket}/{obj:path}")
@@ -99,12 +157,15 @@ async def get_object(bucket: str, obj: str):
         if bucket not in buckets or obj not in buckets[bucket]:
             raise HTTPException(status_code=404, detail="Object not found")
         data = buckets[bucket][obj]  # Получаем данные объекта
+    etag = hashlib.md5(data).hexdigest()
     return StreamingResponse(
         BytesIO(data),  # Оборачиваем в BytesIO для потоковой отдачи
         media_type="application/octet-stream",  # MIME тип для бинарных данных
         headers={
-            "Content-Disposition": f"attachment; filename={obj}"
-        },  # Заголовок для скачивания
+            "Content-Disposition": f"attachment; filename={obj}",
+            "ETag": f'"{etag}"',
+            "Content-Length": str(len(data)),
+        },  # Заголовки
     )
 
 
