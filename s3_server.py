@@ -44,7 +44,7 @@ app = FastAPI()
 
 # Словарь для хранения данных: бакет -> {объект: данные}
 buckets: dict[str, dict[str, bytes]] = defaultdict(dict)
-lock = asyncio.Lock()
+lock: asyncio.Lock = asyncio.Lock()
 # словарь бакетов: {бакет: {объект: данные}}
 
 
@@ -57,7 +57,7 @@ def generate_bucket_list_xml(
     """
     Генерирует XML для списка объектов в бакете в формате S3.
     """
-    xml_parts = [
+    xml_parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-20/">',
         f"<Name>{bucket}</Name>",
@@ -69,11 +69,11 @@ def generate_bucket_list_xml(
     for obj in filtered_objects:
         data = bucket_data[obj]
         # Вычисляем ETag как MD5 хэш данных объекта
-        etag = hashlib.md5(data).hexdigest()
+        etag: str = hashlib.md5(data, usedforsecurity=False).hexdigest()
         # Получаем текущее время в UTC для LastModified
-        utc_now = datetime.now(timezone.utc)
-        last_modified = utc_now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        size = len(data)
+        utc_now: datetime = datetime.now(timezone.utc)
+        last_modified: str = utc_now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        size: int = len(data)
         xml_parts.extend(
             [
                 "<Contents>",
@@ -90,7 +90,7 @@ def generate_bucket_list_xml(
 
 
 @app.put("/{bucket}")
-async def create_bucket(bucket: str):
+async def create_bucket(bucket: str) -> Response:
     """
     Создает новый бакет.
     Если бакет уже существует, возвращает ошибку 409 (Conflict).
@@ -101,16 +101,15 @@ async def create_bucket(bucket: str):
                 status_code=409,
                 detail="Bucket already exists",
             )
-        buckets[bucket]  # Инициализируем пустой словарь для объектов
+        buckets[bucket] = {}  # Инициализируем пустой словарь для объектов
     return Response(status_code=200)
 
 
 @app.get("/{bucket}")
 async def list_objects(
     bucket: str,
-    list_type: str | None = None,
     prefix: str = "",
-):
+) -> Response:
     """
     Возвращает список объектов в указанном бакете в формате S3 XML.
     Если бакет не найден, возвращает ошибку 404.
@@ -119,26 +118,27 @@ async def list_objects(
         if bucket not in buckets:
             raise HTTPException(status_code=404, detail="Bucket not found")
         # Фильтруем объекты по префиксу
-        filtered_objects = [
+        filtered_objects: list[str] = [
             obj for obj in buckets[bucket].keys() if obj.startswith(prefix)
         ]
         # Генерируем XML
-        xml_response = generate_bucket_list_xml(
+        xml_response: str = generate_bucket_list_xml(
             bucket, prefix, filtered_objects, buckets[bucket]
         )
     return Response(content=xml_response, media_type="application/xml")
 
 
 @app.put("/{bucket}/{obj:path}")
-async def put_object(bucket: str, obj: str, request: Request):
+async def put_object(bucket: str, obj: str, request: Request) -> Response:
     """
     Загружает объект в бакет.
     Читает тело запроса как данные объекта и сохраняет в памяти.
     Если бакет не найден, возвращает ошибку 404.
-    Поддерживает условные заголовки If-None-Match и If-Match для условных записей.
+    Поддерживает условные заголовки If-None-Match и If-Match
+    для условных записей.
     Возвращает ETag в заголовке.
     """
-    data = await request.body()  # Асинхронно читаем тело запроса
+    data: bytes = await request.body()  # Асинхронно читаем тело запроса
     async with lock:
         if bucket not in buckets:
             raise HTTPException(status_code=404, detail="Bucket not found")
@@ -152,12 +152,15 @@ async def put_object(bucket: str, obj: str, request: Request):
 
         buckets[bucket][obj] = data  # Сохраняем данные объекта
     # Вычисляем ETag как MD5 хэш данных
-    etag = hashlib.md5(data).hexdigest()
-    return Response(status_code=200, headers={"ETag": f'"{etag}"'})
+    etag: str = hashlib.md5(data, usedforsecurity=False).hexdigest()
+    return Response(
+        status_code=200,
+        headers={"ETag": f'"{etag}"'},
+    )
 
 
 @app.head("/{bucket}/{obj:path}")
-async def head_object(bucket: str, obj: str):
+async def head_object(bucket: str, obj: str) -> Response:
     """
     Возвращает метаданные объекта без тела.
     Используется для проверки существования объекта.
@@ -166,8 +169,8 @@ async def head_object(bucket: str, obj: str):
     async with lock:
         if bucket not in buckets or obj not in buckets[bucket]:
             raise HTTPException(status_code=404, detail="Object not found")
-        data = buckets[bucket][obj]  # Получаем данные объекта
-    etag = hashlib.md5(data).hexdigest()
+        data: bytes = buckets[bucket][obj]  # Получаем данные объекта
+    etag: str = hashlib.md5(data, usedforsecurity=False).hexdigest()
     return Response(
         status_code=200,
         headers={
@@ -179,7 +182,7 @@ async def head_object(bucket: str, obj: str):
 
 
 @app.get("/{bucket}/{obj:path}")
-async def get_object(bucket: str, obj: str):
+async def get_object(bucket: str, obj: str) -> StreamingResponse:
     """
     Скачивает объект из бакета.
     Возвращает данные как поток с заголовком для скачивания.
@@ -188,8 +191,8 @@ async def get_object(bucket: str, obj: str):
     async with lock:
         if bucket not in buckets or obj not in buckets[bucket]:
             raise HTTPException(status_code=404, detail="Object not found")
-        data = buckets[bucket][obj]  # Получаем данные объекта
-    etag = hashlib.md5(data).hexdigest()
+        data: bytes = buckets[bucket][obj]  # Получаем данные объекта
+    etag: str = hashlib.md5(data, usedforsecurity=False).hexdigest()
     return StreamingResponse(
         BytesIO(data),  # Оборачиваем в BytesIO для потоковой отдачи
         media_type="application/octet-stream",  # MIME тип для бинарных данных
@@ -202,7 +205,7 @@ async def get_object(bucket: str, obj: str):
 
 
 @app.delete("/{bucket}/{obj:path}")
-async def delete_object(bucket: str, obj: str):
+async def delete_object(bucket: str, obj: str) -> dict[str, str]:
     """
     Удаляет объект из бакета.
     Если объект или бакет не найдены, возвращает ошибку 404.
@@ -214,7 +217,7 @@ async def delete_object(bucket: str, obj: str):
     return {"message": "Object deleted"}
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     """
     Парсит аргументы командной строки.
     Возвращает объект с аргументами.
@@ -228,8 +231,8 @@ def parse_arguments():
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="Хост для запуска сервера (по умолчанию: 0.0.0.0)",
+        default="127.0.0.1",
+        help="Хост для запуска сервера (по умолчанию: 127.0.0.1)",
     )
     parser.add_argument(
         "--port",
@@ -245,10 +248,10 @@ if __name__ == "__main__":
     import uvicorn  # Импортируем uvicorn для запуска ASGI сервера
 
     # Парсим аргументы
-    args = parse_arguments()
-    debug = args.debug
-    host = args.host
-    port = args.port
+    args: argparse.Namespace = parse_arguments()
+    debug: bool = args.debug
+    host: str = args.host
+    port: int = args.port
 
     if debug:
         # Настраиваем логирование
@@ -261,21 +264,21 @@ if __name__ == "__main__":
         class LoggingMiddleware(BaseHTTPMiddleware):
             """Middleware для логирования запросов и ответов в debug режиме."""
 
-            def __init__(self, app):
-                super().__init__(app)
+            def __init__(self, middleware_app) -> None:
+                super().__init__(middleware_app)
 
-            def get_name(self):
+            def get_name(self) -> str:
                 """Возвращает имя middleware."""
                 return "LoggingMiddleware"
 
-            async def dispatch(self, request, call_next):
-                logging.debug(f"Запрос: {request.method} {request.url}")
+            async def dispatch(self, request, call_next) -> Response:
+                logging.debug("Запрос: %s %s", request.method, request.url)
                 try:
-                    response = await call_next(request)
-                    logging.debug(f"Ответ: {response.status_code}")
+                    response: Response = await call_next(request)
+                    logging.debug("Ответ: %s", response.status_code)
                     return response
                 except Exception as e:
-                    logging.debug(f"Ошибка: {e}")
+                    logging.debug("Ошибка: %s", e)
                     raise
 
         app.add_middleware(LoggingMiddleware)
